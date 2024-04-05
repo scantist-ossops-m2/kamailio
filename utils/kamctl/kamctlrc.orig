@@ -118,7 +118,7 @@
 # CTLENGINE="FIFO"
 
 ## path to FIFO file
-# FIFOPATH="/var/run/kamailio/kamailio_fifo"
+# FIFOPATH="/tmp/kamailio_fifo"
 
 ## check ACL names; default on (1); off (0)
 # VERIFY_ACL=1
@@ -136,7 +136,7 @@
 
 ## Kamailio START Options
 ## PID file path - default is: /var/run/kamailio.pid
-# PID_FILE=/var/run/kamailio/kamailio.pid
+# PID_FILE=/var/run/kamailio.pid
 
 ## Extra start options - default is: not set
 # example: start Kamailio with 64MB share memory: STARTOPTIONS="-m 64"
