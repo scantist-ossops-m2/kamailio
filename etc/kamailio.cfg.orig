@@ -1,6 +1,6 @@
 #!KAMAILIO
 #
-# Kamailio (OpenSER) SIP Server v3.4 - default configuration script
+# Kamailio (OpenSER) SIP Server v4.1 - default configuration script
 #     - web: http://www.kamailio.org
 #     - git: http://sip-router.org
 #
@@ -67,18 +67,6 @@
 #     - define WITH_XMLRPC
 #     - adjust route[XMLRPC] for access policy
 #
-# *** To enable the embedded http server:
-#     - define WITH_XHTTP
-#
-# *** To enable the RPC web interface execute:
-#     - enable xhttp
-#     - define WITH_XHTTP_RPC
-#
-# *** To enable the provisioning web interface execute:
-#     - enable mysql
-#     - enable xhttp
-#     - define WITH_XHTTP_PI
-#
 # *** To enable anti-flood detection execute:
 #     - adjust pike and htable=>ipban settings as needed (default is
 #       block if more than 16 requests in 2 seconds and ban for 300 seconds)
@@ -144,6 +132,7 @@ import_file "kamailio-local.cfg"
 
 ####### Global Parameters #########
 
+### LOG Levels: 3=DBG, 2=INFO, 1=NOTICE, 0=WARN, -1=ERR
 #!ifdef WITH_DEBUG
 debug=4
 log_stderror=yes
@@ -186,10 +175,6 @@ enable_tls=yes
 # - a bit higher than registration expires to cope with UA behind NAT
 tcp_connection_lifetime=3605
 
-#!ifdef WITH_XHTTP
-tcp_accept_no_cl=yes
-#!endif
-
 ####### Custom Parameters #########
 
 # These parameters can be modified runtime via RPC interface
@@ -222,9 +207,9 @@ voicemail.srv_port = "5060" desc "VoiceMail Port"
 
 # set paths to location of modules (to sources or installation folders)
 #!ifdef WITH_SRCPATH
-mpath="modules_k:modules"
+mpath="modules/"
 #!else
-mpath="/usr/local/lib/kamailio/modules_k/:/usr/local/lib/kamailio/modules/"
+mpath="/usr/local/lib/kamailio/modules/"
 #!endif
 
 #!ifdef WITH_MYSQL
@@ -298,26 +283,12 @@ loadmodule "xmlrpc.so"
 loadmodule "debugger.so"
 #!endif
 
-#!ifdef WITH_XHTTP
-loadmodule "xhttp.so"
-#!endif
-
-#!ifdef WITH_XHTTP_RPC
-loadmodule "xhttp_rpc.so"
-#!endif
-
-#!ifdef WITH_XHTTP_PI
-loadmodule "xhttp_pi.so"
-#!endif
-
 # ----------------- setting module-specific parameters ---------------
 
 
 # ----- mi_fifo params -----
-modparam("mi_fifo", "fifo_name", "/var/run/kamailio/kamailio_fifo")
+modparam("mi_fifo", "fifo_name", "/tmp/kamailio_fifo")
 
-# ----- ctl params -----
-modparam("ctl", "binrpc", "unix:/var/run/kamailio/kamailio_ctl")
 
 # ----- tm params -----
 # auto-discard branches from previous serial forking leg
@@ -475,15 +446,6 @@ modparam("xmlrpc", "url_match", "^/RPC")
 modparam("debugger", "cfgtrace", 1)
 #!endif
 
-#!ifdef WITH_XHTTP_RPC
-modparam("xhttp_rpc", "xhttp_rpc_root", "http_rpc")
-#!endif
-
-#!ifdef WITH_XHTTP_PI
-modparam("xhttp_pi", "xhttp_pi_root", "http_pi")
-modparam("xhttp_pi", "framework", "/usr/local/etc/kamailio/pi_framework.xml")
-#!endif
-
 ####### Routing Logic ########
 
 
@@ -501,8 +463,9 @@ request_route {
 	# CANCEL processing
 	if (is_method("CANCEL"))
 	{
-		if (t_check_trans())
-			t_relay();
+		if (t_check_trans()) {
+			route(RELAY);
+		}
 		exit;
 	}
 
@@ -551,8 +514,6 @@ request_route {
 
 	# user location service
 	route(LOCATION);
-
-	route(RELAY);
 }
 
 
@@ -642,7 +603,7 @@ route[WITHINDLG] {
 					# no loose-route, but stateful ACK;
 					# must be an ACK after a 487
 					# or e.g. 404 from upstream server
-					t_relay();
+					route(RELAY);
 					exit;
 				} else {
 					# ACK without matching transaction ... ignore and discard
@@ -709,6 +670,9 @@ route[LOCATION] {
 	{
 		setflag(FLT_ACCMISSED);
 	}
+
+	route(RELAY);
+	exit;
 }
 
 # Presence server route
@@ -716,21 +680,25 @@ route[PRESENCE] {
 	if(!is_method("PUBLISH|SUBSCRIBE"))
 		return;
 
+	if(is_method("SUBSCRIBE") && $hdr(Event)=="message-summary") {
+		route(TOVOICEMAIL);
+		# returns here if no voicemail server is configured
+		sl_send_reply("404", "No voicemail service");
+		exit;
+	}
+
 #!ifdef WITH_PRESENCE
 	if (!t_newtran())
 	{
 		sl_reply_error();
 		exit;
-	};
+	}
 
 	if(is_method("PUBLISH"))
 	{
 		handle_publish();
 		t_release();
-	}
-	else
-	if( is_method("SUBSCRIBE"))
-	{
+	} else if(is_method("SUBSCRIBE")) {
 		handle_subscribe();
 		t_release();
 	}
@@ -789,7 +757,8 @@ route[NATDETECT] {
 		if (is_method("REGISTER")) {
 			fix_nated_register();
 		} else {
-			add_contact_alias();
+			if(is_first_hop())
+				set_contact_alias();
 		}
 		setflag(FLT_NATS);
 	}
@@ -810,16 +779,19 @@ route[NATMANAGE] {
 	if (!(isflagset(FLT_NATS) || isbflagset(FLB_NATB)))
 		return;
 
-	rtpproxy_manage();
+	rtpproxy_manage("co");
 
 	if (is_request()) {
 		if (!has_totag()) {
-			add_rr_param(";nat=yes");
+			if(t_is_branch_route()) {
+				add_rr_param(";nat=yes");
+			}
 		}
 	}
 	if (is_reply()) {
 		if(isbflagset(FLB_NATB)) {
-			add_contact_alias();
+			if(is_first_hop())
+				set_contact_alias();
 		}
 	}
 #!endif
@@ -902,7 +874,7 @@ route[XMLRPC] {
 # route to voicemail server
 route[TOVOICEMAIL] {
 #!ifdef WITH_VOICEMAIL
-	if(!is_method("INVITE"))
+	if(!is_method("INVITE|SUBSCRIBE"))
 		return;
 
 	# check if VoiceMail server IP is defined
@@ -910,11 +882,17 @@ route[TOVOICEMAIL] {
 		xlog("SCRIPT: VoiceMail rotuing enabled but IP not defined\n");
 		return;
 	}
-	if($avp(oexten)==$null)
-		return;
-
-	$ru = "sip:" + $avp(oexten) + "@" + $sel(cfg_get.voicemail.srv_ip)
+	if(is_method("INVITE")) {
+		if($avp(oexten)==$null)
+			return;
+		$ru = "sip:" + $avp(oexten) + "@" + $sel(cfg_get.voicemail.srv_ip)
 				+ ":" + $sel(cfg_get.voicemail.srv_port);
+	} else {
+		if($rU==$null)
+			return;
+		$ru = "sip:" + $rU + "@" + $sel(cfg_get.voicemail.srv_ip)
+				+ ":" + $sel(cfg_get.voicemail.srv_port);
+	}
 	route(RELAY);
 	exit;
 #!endif
@@ -955,28 +933,9 @@ failure_route[MANAGE_FAILURE] {
 	# serial forking
 	# - route to voicemail on busy or no answer (timeout)
 	if (t_check_status("486|408")) {
+		$du = $null;
 		route(TOVOICEMAIL);
 		exit;
 	}
 #!endif
 }
-
-#!ifdef WITH_XHTTP
-event_route[xhttp:request] {
-#!ifdef WITH_XHTTP_RPC
-	$var(xhttp_rpc_root) = $(hu{s.substr,0,9});
-	if ($var(xhttp_rpc_root) == "/http_rpc") {
-		dispatch_xhttp_rpc();
-	}
-#!endif
-#!ifdef WITH_XHTTP_PI
-	$var(xhttp_rpc_root) = $(hu{s.substr,0,8});
-	if ($var(xhttp_rpc_root) == "/http_pi") {
-		dispatch_xhttp_pi();
-	}
-#!endif
-	xhttp_reply("200", "OK", "text/html",
-		"<html><body>Wrong URL $hu</body></html>");
-}
-#!endif
-
